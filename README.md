@@ -1,6 +1,6 @@
 # Travel Booking System
 
-### A modular Spring Cloud platform for hotels, flights, authentication, reservations, and payments
+### A scalable Spring Cloud platform for hotels, flights, authentication, reservations, and payments
 
 [![Java](https://img.shields.io/badge/Java-21-ED8B00?logo=openjdk&logoColor=white)](https://www.oracle.com/java/technologies/javase/jdk21-archive-downloads.html)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.x-6DB33F?logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
@@ -9,26 +9,40 @@
 [![JWT](https://img.shields.io/badge/JWT-Security-000000?logo=jsonwebtokens&logoColor=white)](https://jwt.io/)
 [![Eureka](https://img.shields.io/badge/Discovery-Eureka-6DB33F?logo=spring&logoColor=white)](https://spring.io/projects/spring-cloud-netflix)
 
-> A domain-driven travel booking backend where independent Spring Boot services collaborate through service discovery and a centralized API gateway.
+> A domain-driven travel booking backend where independently deployable Spring Boot services collaborate through service discovery and a centralized API gateway.
 
-## What this project is
+## Product overview
 
-This repository implements the backend of a travel booking platform. It separates the application into dedicated services for:
+This platform supports the core workflow of a travel booking application:
 
-- hotel and room inventory;
-- flight inventory;
-- user registration and authentication;
-- reservation creation and ownership;
-- payment simulation;
-- request routing and service discovery.
+```text
+Discover hotels and flights
+          |
+          v
+Authenticate the traveler
+          |
+          v
+Check availability
+          |
+          v
+Create a reservation
+          |
+          v
+Process payment
+          |
+          v
+Confirm or cancel the booking
+```
 
-The system is designed so that a frontend communicates with one stable gateway URL while internal services remain independently deployable and discoverable.
+The system is intentionally split into business-focused microservices so the platform can grow without turning into one tightly coupled application.
 
 ## Connected frontend
 
 The companion frontend is available here:
 
 **[TravelBookingSystem_FrontEnd](https://github.com/Oussamoux1234/TravelBookingSystem_FrontEnd)**
+
+The frontend communicates with the API Gateway rather than calling internal services directly:
 
 ```text
 Frontend
@@ -41,36 +55,19 @@ API Gateway :8080
    +--> Flight Service :8082
    `--> Booking Service :8083
             |
-            +--> User and reservation database
+            +--> H2 development database
+            +--> JWT security
             +--> Hotel Service through OpenFeign
             `--> Flight Service through WebClient
 ```
 
-## Repository architecture
-
-```text
-TravelBookingSystem/
-├── api-gateway/       # Public entry point and route forwarding
-├── booking-service/   # Auth, JWT, reservations, payment simulation
-├── eureka-server/     # Service registry on port 8761
-├── hotel-service/     # Hotels, rooms, and availability
-├── vol-service/       # Flights and available seats
-├── src/               # Root Spring Boot module scaffold
-├── pom.xml            # Maven reactor and dependency management
-├── mvnw               # Maven Wrapper for Linux/macOS
-└── mvnw.cmd           # Maven Wrapper for Windows
-```
-
-The deployable business services are the modules under `api-gateway`, `booking-service`, `eureka-server`, `hotel-service`, and `vol-service`. The root `pom.xml` is the Maven parent and reactor project; it also includes a root application scaffold under `src`.
-
-## Runtime architecture
+## Microservices architecture
 
 ```text
                                       +------------------+
-                                      | Web / Mobile UI  |
+                                      | Frontend client  |
                                       +--------+---------+
                                                |
-                                               | REST + JWT
                                                v
                                       +------------------+
                                       | API Gateway      |
@@ -85,16 +82,13 @@ The deployable business services are the modules under `api-gateway`, `booking-s
                          v                     v                      v
                  +---------------+     +---------------+     +----------------+
                  | hotel-service  |     | vol-service   |     | booking-service|
-                 | :8081          |     | :8082         |     | :8083          |
+                 | catalog        |     | flights       |     | auth + booking |
                  +-------+-------+     +-------+-------+     +--------+-------+
                          |                     |                       |
-                         v                     v                       +--> H2 bookingdb
-                 +---------------+     +---------------+               |
-                 | Hotels / Rooms|     | Flights / Seats|               +--> JWT security
-                 +---------------+     +---------------+               +--> payment simulation
-                                                                       |
-                                                                       +--> OpenFeign -> hotel-service
-                                                                       +--> WebClient -> vol-service
+                         v                     v                       +--> H2 / future DB
+                 +---------------+     +---------------+               +--> JWT filter
+                 | hotels/rooms  |     | flights/seats |               +--> payment service
+                 +---------------+     +---------------+
 
                                       +------------------+
                                       | Eureka Server    |
@@ -102,46 +96,181 @@ The deployable business services are the modules under `api-gateway`, `booking-s
                                       +------------------+
 ```
 
-## Service discovery with Eureka
+## Service responsibilities
 
-The Eureka server runs as a standalone registry on port `8761` and is configured not to register itself or fetch another registry.
+| Service | Responsibility | Current implementation |
+|---|---|---|
+| `api-gateway` | Public entry point and request routing | Spring Cloud Gateway on `8080` |
+| `eureka-server` | Service registry and discovery | Eureka server on `8761` |
+| `hotel-service` | Hotels, rooms, prices, availability | Spring Boot, JPA, H2, seed data |
+| `vol-service` | Flights, schedules, prices, seats | Spring Boot, JPA, H2, seed data |
+| `booking-service` | Users, JWT auth, reservations, payment flow | Spring Security, JPA, H2, OpenFeign, WebClient |
 
-Each client service registers with Eureka:
+## How service discovery works
+
+The Eureka server is the registry for the platform:
 
 ```text
-hotel-service  --registers as--> HOTEL-SERVICE
-vol-service    --registers as--> VOL-SERVICE
-booking-service--registers as--> BOOKING-SERVICE
-api-gateway    --discovers-----> those service names
+hotel-service   --registers--> Eureka
+vol-service     --registers--> Eureka
+booking-service --registers--> Eureka
+api-gateway     --discovers--> Eureka
 ```
 
-The gateway uses logical load-balanced destinations such as:
+The gateway routes using logical service names such as:
 
 ```yaml
 uri: lb://hotel-service
 ```
 
-This prevents the frontend from depending on internal hostnames or instance ports. If several instances of a service are registered, the gateway can route traffic across them.
+The booking service also uses discovery-aware clients:
 
-## API Gateway routes
+```java
+@FeignClient(name = "HOTEL-SERVICE")
+```
 
-The gateway listens on port `8080` and currently defines these routes:
+and:
 
-| Route | Destination | Purpose |
-|---|---|---|
-| `/hotels/**` | `hotel-service` | Hotel details and availability |
-| `/vols/**` | `vol-service` | Flight data |
-| `/reservations` | `booking-service` | Create and test reservation access |
-| `/reservations/**` | `booking-service` | User reservations and reservation details |
-| `/auth/**` | `booking-service` | Registration, login, and current-user access |
+```text
+http://VOL-SERVICE
+```
 
-The gateway also exposes Actuator endpoints through its management configuration. Review that exposure before production deployment.
+This avoids hard-coding internal IP addresses and enables multiple instances of the same service.
 
-## Hotel service
+## End-to-end request flows
 
-### Domain model
+### Hotel details and availability
 
-The hotel service uses two JPA entities:
+```text
+GET /hotels/{id}
+        |
+        v
+API Gateway
+        |
+        v
+HotelController.getHotelDetails()
+        |
+        v
+HotelRepository.findById()
+        |
+        v
+Hotel + rooms returned as JSON
+```
+
+Availability:
+
+```text
+GET /hotels/{id}/disponibilite/{type}
+        |
+        v
+Load hotel
+        |
+        v
+Search its rooms
+        |
+        +--> matching room type
+        +--> disponible = true
+        |
+        v
+Return true or false
+```
+
+### Authentication
+
+```text
+POST /auth/register
+        |
+        v
+Validate request
+        |
+        v
+Check duplicate email
+        |
+        v
+BCrypt password hashing
+        |
+        v
+Save User
+        |
+        v
+Generate JWT
+        |
+        v
+Return AuthResponse
+```
+
+```text
+POST /auth/login
+        |
+        v
+AuthenticationManager
+        |
+        v
+UserDetailsService + UserRepository
+        |
+        v
+Verify BCrypt password
+        |
+        v
+JwtService.generateToken()
+        |
+        v
+Return JWT + user information
+```
+
+### Authenticated request
+
+```text
+Request with Authorization: Bearer <JWT>
+        |
+        v
+JwtAuthenticationFilter
+        |
+        +--> Extract token
+        +--> Extract email
+        +--> Load User
+        +--> Validate signature and expiration
+        `--> Populate SecurityContext
+```
+
+The reservation routes then use the authenticated user from the security context.
+
+### Reservation creation
+
+```text
+POST /reservations
+        |
+        v
+BookingController.creerReservation()
+        |
+        +--> Read current authenticated User
+        |
+        +--> If volId exists:
+        |       WebClient -> VOL-SERVICE /vols/{id}
+        |       Check placesDisponibles
+        |       Add flight price
+        |
+        +--> If hotelId exists:
+        |       OpenFeign -> HOTEL-SERVICE /hotels/{id}
+        |       OpenFeign -> availability endpoint
+        |       Add hotel price per night
+        |
+        +--> Reject if no valid item is available
+        +--> Build Reservation
+        +--> Set owner and booking details
+        +--> Save with EN_ATTENTE_PAIEMENT
+        |
+        +--> PaiementService.payer(total)
+        |       |
+        |       +--> success: transaction ID + CONFIRMEE
+        |       `--> failure: ANNULEE
+        |
+        `--> Return reservation response
+```
+
+## Domain models
+
+### Hotel domain
 
 ```text
 Hotel
@@ -160,24 +289,7 @@ Chambre
   └── hotel
 ```
 
-`Hotel` owns a lazy, cascading one-to-many relationship with `Chambre`. The room's reverse `hotel` relationship is ignored during JSON serialization to avoid recursive output.
-
-### Endpoints implemented by `HotelController`
-
-| Method | Endpoint | Behavior |
-|---|---|---|
-| `GET` | `/hotels/{id}` | Returns a hotel or `null` when not found |
-| `GET` | `/hotels/{id}/disponibilite/{type}` | Checks whether a room of the requested type is available |
-
-Availability is checked by loading the hotel and searching its rooms for a matching `TypeChambre` and `disponible = true`.
-
-### Development data
-
-`HotelDataInitializer` inserts ten sample hotels and rooms at startup, including examples in Chamonix, New York, Nice, Paris, Marrakech, Kyoto, and Zermatt. The prices and availability are development seed data, not an external inventory integration.
-
-## Flight service
-
-The `vol-service` uses the `Vol` JPA entity:
+### Flight domain
 
 ```text
 Vol
@@ -191,225 +303,216 @@ Vol
   └── placesDisponibles
 ```
 
-`VolDataInitializer` inserts ten sample routes, including Paris–New York, Tokyo–Seoul, London–Singapore, Dubai–Paris, and Miami–Cancun. The data is generated relative to application startup with `LocalDateTime.now()`.
-
-The gateway exposes the flight domain through `/vols/**`.
-
-## Booking service
-
-The booking service owns users and reservations and runs on port `8083` with an in-memory H2 database named `bookingdb`.
-
-### Reservation model
-
-A reservation contains:
-
-- reservation timestamp;
-- client email;
-- reservation status;
-- optional flight ID;
-- optional hotel ID;
-- total amount;
-- simulated payment transaction ID;
-- passenger name;
-- room type;
-- seat number;
-- flight class;
-- hotel check-in and check-out dates;
-- owning authenticated user.
-
-Reservation statuses are represented by the `StatutReservation` enum. The booking workflow starts at `EN_ATTENTE_PAIEMENT`, then becomes `CONFIRMEE` after simulated payment succeeds, or `ANNULEE` when payment fails.
-
-## Authentication and JWT flow
-
-Authentication is implemented inside `booking-service`.
-
-### Registration
+### Reservation domain
 
 ```text
-POST /auth/register
-        |
-        v
-Validate RegisterRequest
-        |
-        v
-Check UserRepository.existsByEmail()
-        |
-        v
-Hash password with BCrypt
-        |
-        v
-Persist User
-        |
-        v
-Generate JWT
-        |
-        v
-Return AuthResponse
+Reservation
+  ├── id
+  ├── dateReservation
+  ├── clientEmail
+  ├── statutReservation
+  ├── volId
+  ├── hotelId
+  ├── montantTotal
+  ├── transactionPaiementId
+  ├── passengerName
+  ├── typeChambre
+  ├── seatNumber
+  ├── flightClass
+  ├── checkInDate
+  ├── checkOutDate
+  └── user ownership
 ```
 
-### Login
+## API surface
 
-```text
-POST /auth/login
-        |
-        v
-AuthenticationManager
-        |
-        v
-DaoAuthenticationProvider
-        |
-        v
-UserDetailsService -> UserRepository.findByEmail()
-        |
-        v
-Validate BCrypt password
-        |
-        v
-JwtService.generateToken()
-        |
-        v
-Return token, user ID, email, and name
-```
+### Gateway routes
 
-### Current user
+| Method | Endpoint | Access | Description |
+|---|---|---:|---|
+| `GET` | `/hotels/{id}` | Public | Get hotel details |
+| `GET` | `/hotels/{id}/disponibilite/{type}` | Public | Check room availability |
+| `GET` | `/vols/**` | Public | Access flight operations |
+| `POST` | `/auth/register` | Public | Register a user |
+| `POST` | `/auth/login` | Public | Authenticate a user |
+| `GET` | `/auth/me` | Authenticated | Get current user |
+| `GET` | `/reservations` | Authenticated | Booking-service health response |
+| `GET` | `/reservations/my` | Authenticated | List current user's reservations |
+| `GET` | `/reservations/{id}` | Authenticated | Get owned reservation |
+| `POST` | `/reservations` | Authenticated | Create reservation and process payment |
 
-```text
-GET /auth/me
-Authorization: Bearer <JWT>
-        |
-        v
-JwtAuthenticationFilter
-        |
-        v
-JwtService extracts email and validates expiration
-        |
-        v
-UserRepository loads authenticated User
-        |
-        v
-AuthController returns UserDTO
-```
+## Development data
 
-### Security rules
+The platform currently seeds development data at startup.
 
-`SecurityConfig` uses stateless sessions and a custom `JwtAuthenticationFilter`.
+### Hotels
 
-Public routes:
+`HotelDataInitializer` creates ten sample hotels and rooms across locations including:
+
+- Chamonix;
+- New York;
+- Nice;
+- Paris;
+- Manaus;
+- Marrakech;
+- Maldives;
+- Edinburgh;
+- Kyoto;
+- Zermatt.
+
+### Flights
+
+`VolDataInitializer` creates ten sample flights including:
+
+- Paris to New York;
+- Tokyo to Seoul;
+- London to Singapore;
+- Dubai to Paris;
+- Miami to Cancun;
+- Amsterdam to Barcelona;
+- Sydney to Auckland;
+- Istanbul to Rome;
+- Los Angeles to Honolulu;
+- Frankfurt to Cape Town.
+
+These are startup fixtures for local development, not production inventory.
+
+## Security model
+
+The booking service uses:
+
+- stateless Spring Security sessions;
+- BCrypt password encoding;
+- JWT access tokens;
+- a custom `JwtAuthenticationFilter`;
+- `AuthenticationManager` and `DaoAuthenticationProvider`;
+- ownership checks for reservation reads;
+- public catalog routes and protected reservation routes.
+
+### Public routes
 
 - `/auth/**`;
-- `/h2-console/**`;
-- `/actuator/**`;
 - `/hotels/**`;
 - `/vols/**`;
-- preflight `OPTIONS` requests.
+- `/h2-console/**`;
+- `/actuator/**`;
+- `OPTIONS` preflight requests.
 
-Protected routes:
+### Protected routes
 
 - `/reservations/**`;
-- any other route not explicitly permitted.
+- all non-public routes.
 
-Passwords are encoded with `BCryptPasswordEncoder`. JWT configuration currently comes from `booking-service/src/main/resources/application.yml`.
-
-> For production, move the JWT secret and database credentials into environment variables or a secrets manager. The repository currently contains a development secret in configuration.
-
-## Reservation workflow in detail
-
-`BookingController` coordinates the reservation process:
-
-```text
-POST /reservations
-        |
-        v
-Read authenticated User from SecurityContext
-        |
-        +--> If volId exists:
-        |       WebClient -> http://VOL-SERVICE/vols/{id}
-        |       Check placesDisponibles
-        |       Add flight price to total
-        |
-        +--> If hotelId exists:
-        |       OpenFeign -> HOTEL-SERVICE /hotels/{id}
-        |       OpenFeign -> /hotels/{id}/disponibilite/{type}
-        |       Add hotel price to total
-        |
-        +--> Reject if neither item is available
-        |
-        +--> Build Reservation entity
-        +--> Set ownership to authenticated User
-        +--> Save initial reservation
-        |
-        +--> PaiementService.payer(total)
-        |       |
-        |       +--> success: transaction ID + CONFIRMEE
-        |       `--> failure: ANNULEE + HTTP 500
-        |
-        `--> Return saved reservation
-```
-
-A reservation can contain a flight, a hotel, or both. The total is calculated by adding the selected flight price and hotel nightly price when each item is available.
-
-### Reservation endpoints
-
-| Method | Endpoint | Authentication | Description |
-|---|---|---:|---|
-| `GET` | `/reservations` | Yes | Returns a service health message |
-| `GET` | `/reservations/my` | Yes | Returns reservations owned by the current user |
-| `GET` | `/reservations/{id}` | Yes | Returns one reservation after ownership validation |
-| `POST` | `/reservations` | Yes | Creates and pays for a reservation |
-
-The ownership check prevents one authenticated user from reading another user's reservation.
-
-## Service-to-service communication
-
-The booking service uses two communication styles:
-
-### OpenFeign to hotel service
-
-`HotelRestClient` is declared with:
-
-```java
-@FeignClient(name = "HOTEL-SERVICE")
-```
-
-It calls:
-
-```text
-GET /hotels/{id}
-GET /hotels/{id}/disponibilite/{type}
-```
-
-Eureka resolves `HOTEL-SERVICE` to a registered instance.
-
-### WebClient to flight service
-
-The booking controller builds a WebClient with:
-
-```text
-http://VOL-SERVICE
-```
-
-It calls:
-
-```text
-GET /vols/{id}
-```
-
-The service name is resolved through the Spring Cloud discovery/load-balancing setup.
+> The JWT secret is currently defined in development YAML. Production deployments must load it from a secret manager or environment variable.
 
 ## Payment behavior
 
-`PaiementService` currently simulates payment:
+Payment is currently simulated by `PaiementService`:
 
 ```text
 amount > 0
-    -> return TXN-{timestamp}
-    -> reservation becomes CONFIRMEE
+    -> generate TXN-{timestamp}
+    -> set reservation to CONFIRMEE
 
-amount <= 0 or exception
-    -> reservation becomes ANNULEE
+amount <= 0 or payment exception
+    -> set reservation to ANNULEE
 ```
 
-It is intentionally a placeholder for a future payment provider integration. A production implementation should use an external payment service, idempotency keys, transaction state reconciliation, and secure webhook handling.
+A future payment service should add a real provider, idempotency, secure callbacks, reconciliation, and retry handling.
+
+## Scalability design
+
+### Current scalability foundation
+
+- independent Spring Boot services;
+- centralized gateway entry point;
+- Eureka service discovery;
+- logical load-balanced service names;
+- domain-specific data ownership;
+- service-to-service clients through Feign and WebClient;
+- Actuator support for health and monitoring;
+- Maven multi-module build.
+
+### Horizontal scaling
+
+```text
+                         +--> hotel-service instance 1
+API Gateway + Eureka ----+--> hotel-service instance 2
+                         `--> hotel-service instance 3
+```
+
+The same model can be used for booking and flight traffic. The frontend remains unchanged because it calls the gateway, not individual instances.
+
+### Recommended production evolution
+
+1. Replace H2 with PostgreSQL or MySQL.
+2. Use a database per service.
+3. Add Flyway or Liquibase migrations.
+4. Externalize all secrets and service configuration.
+5. Add Docker and Docker Compose.
+6. Add Kubernetes deployments and health probes.
+7. Add Resilience4j circuit breakers and timeouts.
+8. Add Redis caching for hotel and flight searches.
+9. Add Kafka or RabbitMQ for asynchronous booking events.
+10. Add Prometheus, Grafana, and OpenTelemetry.
+11. Add centralized logging.
+12. Add API rate limiting.
+13. Add pagination and search filters.
+14. Add contract and integration tests.
+15. Make seed data conditional by profile.
+
+## Visual architecture test
+
+The following Mermaid diagram can be rendered by GitHub to provide a visual system test of the runtime architecture:
+
+```mermaid
+flowchart LR
+    FE[Travel Frontend] -->|HTTP + JWT| GW[API Gateway :8080]
+    GW -->|lb://hotel-service| HOTEL[Hotel Service :8081]
+    GW -->|lb://vol-service| VOL[Flight Service :8082]
+    GW -->|lb://booking-service| BOOK[Booking Service :8083]
+
+    EUREKA[Eureka Server :8761]
+    HOTEL -.registers.-> EUREKA
+    VOL -.registers.-> EUREKA
+    BOOK -.registers.-> EUREKA
+    GW -.discovers.-> EUREKA
+
+    BOOK -->|OpenFeign| HOTEL
+    BOOK -->|WebClient| VOL
+    BOOK --> AUTH[JWT + Spring Security]
+    BOOK --> DB[(H2 / future PostgreSQL)]
+    HOTEL --> HDB[(Hotel database)]
+    VOL --> VDB[(Flight database)]
+```
+
+### Visual booking test
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant F as Frontend
+    participant G as API Gateway
+    participant B as Booking Service
+    participant H as Hotel Service
+    participant V as Flight Service
+    participant P as Payment Simulation
+
+    U->>F: Submit reservation
+    F->>G: POST /reservations + JWT
+    G->>B: Forward authenticated request
+    B->>B: Validate JWT and ownership
+    B->>V: GET /vols/{id}
+    V-->>B: Flight and seat availability
+    B->>H: GET hotel details
+    H-->>B: Hotel and room availability
+    B->>B: Create EN_ATTENTE_PAIEMENT reservation
+    B->>P: payer(total)
+    P-->>B: Transaction ID or failure
+    B-->>G: CONFIRMEE or ANNULEE
+    G-->>F: Reservation response
+    F-->>U: Confirmation screen
+```
 
 ## Configuration and ports
 
@@ -421,49 +524,30 @@ It is intentionally a placeholder for a future payment provider integration. A p
 | Flight Service | `8082` | module application configuration |
 | Booking Service | `8083` | `booking-service/src/main/resources/application.yml` |
 
-Booking service development configuration includes:
+Booking development configuration uses:
 
-- H2 in-memory datasource `jdbc:h2:mem:bookingdb`;
-- Hibernate `create-drop` schema behavior;
-- Eureka URL `http://localhost:8761/eureka/`;
-- JWT expiration of 24 hours.
-
-## Technology stack
-
-- Java 21
-- Spring Boot 3.x
-- Spring Cloud Gateway
-- Spring Cloud Netflix Eureka
-- Spring Data JPA
-- Spring Data REST
-- Spring Security
-- BCrypt
-- JSON Web Tokens with JJWT
-- OpenFeign
-- Spring WebFlux / WebClient
-- H2
-- Lombok
-- Maven
-- Spring Boot Actuator
+```yaml
+spring:
+  datasource:
+    url: jdbc:h2:mem:bookingdb
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+```
 
 ## Build and run
 
 ### Prerequisites
 
-- Java 21 or newer;
-- Maven 3.9+ or the included Maven Wrapper;
+- Java 21+;
+- Maven 3.9+ or Maven Wrapper;
 - Git.
 
-### Clone
+### Clone and build
 
 ```bash
 git clone https://github.com/Oussamoux1234/TravelBookingSystem.git
 cd TravelBookingSystem
-```
-
-### Build all modules
-
-```bash
 ./mvnw clean install
 ```
 
@@ -473,9 +557,9 @@ Windows:
 mvnw.cmd clean install
 ```
 
-### Start the platform
+### Start services
 
-Start services in this order:
+Start each command in a separate terminal:
 
 ```bash
 ./mvnw -pl eureka-server spring-boot:run
@@ -485,51 +569,48 @@ Start services in this order:
 ./mvnw -pl api-gateway spring-boot:run
 ```
 
-Run each command in a separate terminal. The frontend should use the gateway URL, not the internal service URLs.
-
-## Useful URLs
-
-- Eureka dashboard: `http://localhost:8761`
-- API gateway: `http://localhost:8080`
-- Gateway health: `http://localhost:8080/actuator/health`
-- H2 console, if enabled: the booking-service H2 console endpoint
-
-## Scalability and production roadmap
-
-The current modular architecture is a foundation for horizontal scaling:
+Recommended order:
 
 ```text
-                         +--> Hotel instance 1
-API Gateway + Eureka ----+--> Hotel instance 2
-                         `--> Hotel instance 3
+1. Eureka Server
+2. Hotel Service
+3. Flight Service
+4. Booking Service
+5. API Gateway
+6. Frontend
 ```
 
-Recommended production improvements:
+## Testing strategy
 
-1. Replace H2 with persistent PostgreSQL or MySQL databases.
-2. Use a database per service to preserve service ownership.
-3. Move secrets and configuration out of Git.
-4. Add Flyway or Liquibase migrations.
-5. Add Resilience4j timeouts, retries, circuit breakers, and fallbacks.
-6. Add Redis caching for hotel and flight search.
-7. Replace payment simulation with a real payment service.
-8. Add an event broker for reservation-created and payment-completed events.
-9. Add Docker Compose for local orchestration.
-10. Add Kubernetes manifests or Helm charts for deployment.
-11. Add centralized logs, metrics, and distributed tracing.
-12. Add contract, integration, and end-to-end tests.
-13. Add API rate limiting and stricter gateway security.
-14. Add pagination and filtering to catalog endpoints.
-15. Make seed data conditional so it does not run in production.
+The repository includes Spring Boot test scaffolds for the modules. Recommended validation commands:
 
-## Current implementation notes
+```bash
+./mvnw test
+./mvnw verify
+```
 
-- The application uses development seed data for hotels and flights.
-- Hotel availability is currently a simple in-memory/entity lookup over room records.
-- Payment is simulated by `PaiementService`.
-- Booking service uses H2 with `create-drop`, so data is not persistent between restarts.
-- The JWT secret is currently present in development configuration and should be externalized.
-- Some service endpoint behavior should be covered with integration tests before production deployment.
+Important test layers to add or expand:
+
+- unit tests for JWT creation and expiration;
+- authentication controller tests;
+- hotel availability tests;
+- booking ownership tests;
+- reservation status transition tests;
+- gateway route tests;
+- Eureka registration tests;
+- Feign and WebClient integration tests;
+- payment failure tests;
+- full end-to-end booking flow tests.
+
+## Current limitations
+
+- H2 databases are in-memory and reset on restart.
+- Payment is simulated.
+- Hotel and flight seed data are inserted at startup.
+- JWT secret is present in development configuration.
+- The catalog API has limited filtering and pagination.
+- Service resilience policies are not yet implemented.
+- Production observability and deployment manifests are not yet included.
 
 ## License
 
